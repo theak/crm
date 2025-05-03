@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Settings - Customer Status Tracker</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select, button {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+            width: 100%;
+            max-width: 400px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            width: auto;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .nav {
+            display: flex;
+            margin-bottom: 20px;
+        }
+        .nav a {
+            margin-right: 15px;
+            text-decoration: none;
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .nav a:hover {
+            text-decoration: underline;
+        }
+        section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background-color: #f9f9f9;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+        h2 {
+            margin-top: 0;
+            color: #333;
+        }
+        .help-text {
+            color: #666;
+            margin-top: 5px;
+            font-size: 0.9em;
+        }
+        #message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <h1>Settings</h1>
+    
+    <div class="nav">
+        <a href="/">Dashboard</a>
+        <a href="/settings" class="active">Settings</a>
+    </div>
+    
+    <div id="message"></div>
+    
+    <section>
+        <h2>User Settings</h2>
+        
+        <form id="emailForm">
+            <div class="form-group">
+                <label for="userEmail">Your Email Address:</label>
+                <input type="email" id="userEmail" placeholder="your.email@example.com" required>
+                <div class="help-text">This email will be used to identify you in LLM prompts when processing incoming emails.</div>
+            </div>
+            
+            <button type="submit">Save Email</button>
+        </form>
+    </section>
+    
+    <section>
+        <h2>Email Processing Setup</h2>
+        <p>To set up email processing:</p>
+        <ol>
+            <li>Set up a forwarding email address with your provider</li>
+            <li>Configure webhooks to point to <code>[your-app-url]/api/process-email</code></li>
+            <li>Test the connection by forwarding an email</li>
+        </ol>
+        <p><em>Note: The email processing feature is currently in development.</em></p>
+    </section>
+    
+    <script>
+        // Show a message to the user
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = isError ? 'error' : 'success';
+            messageDiv.style.display = 'block';
+            
+            // Hide message after 5 seconds
+            setTimeout(() => {
+                messageDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Load user email
+        function loadUserEmail() {
+            fetch('/api/settings/user_email')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('userEmail').value = data.value;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showMessage('Failed to load email settings', true);
+                });
+        }
+        
+        // Handle form submission
+        document.getElementById('emailForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const email = document.getElementById('userEmail').value.trim();
+            
+            fetch('/api/settings/user_email', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    value: email
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage('Your email has been saved');
+                } else {
+                    showMessage(data.error, true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred while saving your email', true);
+            });
+        });
+        
+        // Initial load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadUserEmail();
+        });
+    </script>
+</body>
+</html>
