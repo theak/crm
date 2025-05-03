@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Customer Status Tracker</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select, button {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .status-1 {
+            background-color: #ffcccc; /* Red - You need to respond */
+        }
+        .status-2 {
+            background-color: #ffffcc; /* Yellow - Waiting on them */
+        }
+        .status-3 {
+            background-color: #ccffcc; /* Green - No action needed */
+        }
+        .warning {
+            color: #cc0000;
+            font-weight: bold;
+        }
+        .controls {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+        }
+        #message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+    </style>
+</head>
+<body>
+    <h1>Customer Status Tracker</h1>
+    
+    <div id="message"></div>
+    
+    <div class="controls">
+        <div>
+            <button id="refreshBtn">Refresh Customer List</button>
+        </div>
+        <div>
+            <form id="searchForm">
+                <input type="text" id="searchDomain" placeholder="Search domain...">
+                <button type="submit">Search</button>
+            </form>
+        </div>
+    </div>
+    
+    <h2>Add or Update Customer</h2>
+    <form id="customerForm">
+        <div class="form-group">
+            <label for="domain">Customer Domain:</label>
+            <input type="text" id="domain" required placeholder="example.com">
+        </div>
+        
+        <div class="form-group">
+            <label for="status">Status:</label>
+            <select id="status" required>
+                <option value="1">You need to respond</option>
+                <option value="2">They need to get back to you</option>
+                <option value="3">No action needed</option>
+            </select>
+        </div>
+        
+        <button type="submit">Save Customer Status</button>
+    </form>
+    
+    <h2>Customer List</h2>
+            <table id="customerTable">
+        <thead>
+            <tr>
+                <th>Domain</th>
+                <th>Status</th>
+                <th>Last Changed</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Customer data will be populated here -->
+        </tbody>
+    </table>
+    
+    <script>
+        // Show a message to the user
+        function showMessage(message, isError = false) {
+            const messageDiv = document.getElementById('message');
+            messageDiv.textContent = message;
+            messageDiv.className = isError ? 'error' : 'success';
+            messageDiv.style.display = 'block';
+            
+            // Hide message after 5 seconds
+            setTimeout(() => {
+                messageDiv.style.display = 'none';
+            }, 5000);
+        }
+        
+        // Load all customers
+        function loadCustomers() {
+            fetch('/api/get_customers')
+                .then(response => response.json())
+                .then(data => {
+                    const customerTableBody = document.querySelector('#customerTable tbody');
+                    customerTableBody.innerHTML = '';
+                    
+                    if (data.customers.length === 0) {
+                        const row = document.createElement('tr');
+                        row.innerHTML = '<td colspan="2">No customers found</td>';
+                        customerTableBody.appendChild(row);
+                        return;
+                    }
+                    
+                    data.customers.forEach(customer => {
+                        const row = document.createElement('tr');
+                        row.className = `status-${customer.status}`;
+                        
+                        // Format dates
+                        const statusChangedDate = new Date(customer.status_changed_at);
+                        const createdDate = new Date(customer.created_at);
+                        
+                        // Create a "days ago" status message
+                        const days = customer.days_since_status_change;
+                        let daysMessage = `${days} days ago`;
+                        
+                        // Create a warning class if status hasn't changed in a while
+                        let daysClass = "";
+                        if (customer.status === 1 && days > 2) {
+                            daysClass = "warning"; // Red for "you need to respond" that's overdue
+                        } else if (customer.status === 2 && days > 5) {
+                            daysClass = "warning"; // Red for "waiting on them" that's been too long
+                        }
+                        
+                        row.innerHTML = `
+                            <td>${customer.domain}</td>
+                            <td>${customer.status_name.replace(/_/g, ' ')}</td>
+                            <td class="${daysClass}">${daysMessage}</td>
+                            <td>${createdDate.toLocaleDateString()}</td>
+                        `;
+                        
+                        customerTableBody.appendChild(row);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showMessage('Failed to load customers', true);
+                });
+        }
+        
+        // Handle form submission for adding/updating customer
+        document.getElementById('customerForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const domain = document.getElementById('domain').value.trim();
+            const status = document.getElementById('status').value;
+            
+            fetch('/api/set_customer_status', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    domain: domain,
+                    status: parseInt(status)
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage(data.message);
+                    // After updating, fetch the customer details to show latest status change
+                    fetch(`/api/get_customer_status/${domain}`)
+                        .then(response => response.json())
+                        .then(customerData => {
+                            if (customerData.success) {
+                                const days = customerData.days_since_status_change;
+                                let statusAgeMessage = `${days} days ago`;
+                                showMessage(`${data.message} (Last changed: ${statusAgeMessage})`);
+                            }
+                        });
+                    
+                    loadCustomers();
+                    document.getElementById('domain').value = '';
+                } else {
+                    showMessage(data.error, true);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                showMessage('An error occurred while saving the customer status', true);
+            });
+        });
+        
+        // Handle search form submission
+        document.getElementById('searchForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const domain = document.getElementById('searchDomain').value.trim();
+            if (!domain) {
+                showMessage('Please enter a domain to search', true);
+                return;
+            }
+            
+            fetch(`/api/get_customer_status/${domain}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('domain').value = data.domain;
+                        document.getElementById('status').value = data.status;
+                        
+                        const daysAgo = data.days_since_status_change;
+                        let statusAgeMessage = `${daysAgo} days ago`;
+                        
+                        const createdDate = new Date(data.created_at).toLocaleDateString();
+                        
+                        showMessage(`Found customer: ${data.domain} - Status: ${data.status_name} (Changed: ${statusAgeMessage}, Created: ${createdDate})`);
+                    } else {
+                        showMessage(data.error, true);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    showMessage('An error occurred while searching for the customer', true);
+                });
+        });
+        
+        // Handle refresh button click
+        document.getElementById('refreshBtn').addEventListener('click', function() {
+            loadCustomers();
+        });
+        
+        // Initial load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCustomers();
+        });
+    </script>
+</body>
+</html>
