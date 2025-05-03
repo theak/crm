@@ -1,4 +1,6 @@
 from flask import Flask, request, jsonify, render_template
+from jinja2 import Template
+
 import sqlite3
 import enum
 import os
@@ -298,6 +300,41 @@ def index():
 @app.route('/settings')
 def settings():
     return render_template('settings.html')
+
+# Email processing endpoint (skeleton)
+@app.route('/api/process-email', methods=['GET'])
+def process_email():
+    """Process an incoming email and update customer status"""
+    try:
+        # This is a placeholder for the actual email processing logic
+        # In a real implementation, this would:
+        # 1. Parse the incoming email from the request (format depends on your webhook provider)
+        # 2. Extract necessary information (sender, recipient, subject, body, etc.)
+        # 3. Extract customer domain from the sender's email
+        # 4. Call OpenAI API with the LLM prompt template
+        # 5. Update customer status based on LLM response
+
+        # For now, just return a placeholder response
+        return jsonify({
+            "success": True,
+            "message": "Email processing endpoint is set up but not yet implemented",
+            "user_email": get_setting("user_email").json['value'],
+            "prompt": get_llm_prompt(get_setting("user_email").json['value']),
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# Function to get the LLM prompt template
+def get_llm_prompt(user_email):
+    """Get the LLM prompt template with the user's email filled in"""
+    prompt_path = os.path.join(os.path.dirname(__file__), 'templates', 'llm_prompt.txt')
+
+    with open(prompt_path, 'r') as file:
+        template_content = file.read()
+
+    template = Template(template_content)
+    return template.render(user_email=user_email)
 
 # Initialize database
 def init_app(app):
