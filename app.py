@@ -1,9 +1,12 @@
 import enum
 import functools  # Added for decorator
+import json
 import os
 import re
 import sqlite3
+from email.utils import parseaddr
 
+import requests
 from flask import (
     Flask,
     Response,  # Added for Basic Auth response
@@ -417,33 +420,200 @@ def settings():
     return render_template("settings.html")
 
 
-# Email processing endpoint (skeleton)
-@app.route("/api/process-email", methods=["GET"])
-# No auth required by default for webhook/external access
-def process_email():
-    """Process an incoming email and update customer status"""
+# Helper function to extract domain from email address
+def extract_domain_from_email(email):
+    """Extract domain from email address"""
+    _, email_address = parseaddr(email)
+    if not email_address or "@" not in email_address:
+        return None
+
+    # Get the domain part after @
+    domain = email_address.split("@")[1].lower()
+    return domain
+
+
+# Helper function to use Anthropic API for email analysis
+def analyze_email_with_anthropic(user_email, sender_domain, email_subject, email_body):
+    """Analyze email content with Anthropic API"""
     try:
-        db = get_db()  # Need DB access here
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not anthropic_key:
+            raise ValueError("ANTHROPIC_API_KEY environment variable not found")
+
+        prompt = get_llm_prompt(user_email)
+
+        # Prepare the API request
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": anthropic_key,
+            "anthropic-version": "2023-06-01",
+        }
+
+        # Format for Anthropic's Claude API
+        payload = {
+            "model": "claude-3-sonnet-20240229",
+            "max_tokens": 1000,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": f"Sender domain: {sender_domain}\nSubject: {email_subject}\nBody: {email_body}",
+                },
+            ],
+            "tools": [
+                {
+                    "name": "set_customer_status",
+                    "description": "Set the status for a customer based on email analysis",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "domain": {
+                                "type": "string",
+                                "description": "The domain of the customer",
+                            },
+                            "status": {
+                                "type": "integer",
+                                "description": "The status to set for the customer (1: NEED_TO_RESPOND, 2: WAITING_ON_THEM, 3: NO_ACTION)",
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "Explanation for why this status was chosen",
+                            },
+                        },
+                        "required": ["domain", "status", "reasoning"],
+                    },
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "set_customer_status"},
+        }
+
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages", headers=headers, json=payload
+        )
+        response_data = response.json()
+
+        if "content" not in response_data or not response_data["content"]:
+            raise ValueError(f"Unexpected API response: {response_data}")
+
+        # Extract tool calls from content
+        tool_calls = [
+            item for item in response_data["content"] if item.get("type") == "tool_use"
+        ]
+
+        if not tool_calls:
+            raise ValueError("API did not return expected tool call")
+
+        # Get the first tool call
+        tool_call = tool_calls[0]
+        if tool_call["name"] != "set_customer_status":
+            raise ValueError(f"Unexpected tool name: {tool_call['name']}")
+
+        # Return the input object
+        return tool_call["input"]
+
+    except Exception as e:
+        raise Exception(f"Anthropic API error: {str(e)}")
+
+
+@app.route("/api/process-email", methods=["POST"])
+def process_email():
+    """Process an incoming email from SendGrid webhook and update customer status"""
+    try:
+        # Extract data from SendGrid webhook payload
+        # SendGrid sends form data with email details
+        if request.content_type == "application/json":
+            data = request.get_json()
+        else:
+            # Handle form data
+            data = request.form.to_dict()
+
+        # Extract email details
+        sender = data.get("from", "")
+        subject = data.get("subject", "")
+        body_html = data.get("html", "")
+        body_text = data.get("text", "")
+
+        # Prefer plain text over HTML for analysis
+        email_body = body_text if body_text else body_html
+
+        # Extract domain from sender email
+        sender_domain = extract_domain_from_email(sender)
+        if not sender_domain:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "Could not extract valid domain from sender email",
+                }
+            ), 400
+
+        # Get user email from settings
+        db = get_db()
         cursor = db.cursor()
         cursor.execute("SELECT value FROM settings WHERE key = 'user_email'")
-        user_email_row = cursor.fetchone()
-        user_email = user_email_row["value"] if user_email_row else ""
+        row = cursor.fetchone()
+        user_email = row["value"] if row else ""
 
-        # This is a placeholder for the actual email processing logic
-        # In a real implementation, this would:
-        # 1. Parse the incoming email from the request (format depends on your webhook provider)
-        # 2. Extract necessary information (sender, recipient, subject, body, etc.)
-        # 3. Extract customer domain from the sender's email
-        # 4. Call OpenAI API with the LLM prompt template
-        # 5. Update customer status based on LLM response
+        # Decide which LLM to use based on available API keys
+        if os.environ.get("ANTHROPIC_API_KEY"):
+            result = analyze_email_with_anthropic(
+                user_email, sender_domain, subject, email_body
+            )
+            llm_used = "Anthropic"
+        else:
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "No LLM API key found in environment variables",
+                }
+            ), 500
 
-        # For now, just return a placeholder response
+        # Call set_customer_status endpoint internally
+        status_request = {
+            "domain": result.get("domain", sender_domain),
+            "status": result.get("status"),
+        }
+
+        # Make internal request to set_customer_status
+        status_response = set_customer_status()
+        status_data = json.loads(status_response.data)
+
         return jsonify(
             {
                 "success": True,
-                "message": "Email processing endpoint is set up but not yet implemented",
+                "message": "Email processed successfully",
+                "sender_domain": sender_domain,
+                "status_set": CustomerStatus(result.get("status")).name,
+                "llm_used": llm_used,
+                "reasoning": result.get("reasoning", ""),
+                "status_response": status_data,
+            }
+        )
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# Debugging route for email processing
+@app.route("/api/process-email-debug", methods=["GET"])
+def process_email_debug():
+    """Debug endpoint for email processing logic"""
+    try:
+        # Get user email from settings
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'user_email'")
+        row = cursor.fetchone()
+        user_email = row["value"] if row else ""
+
+        return jsonify(
+            {
+                "success": True,
+                "message": "Email processing endpoint is set up",
                 "user_email": user_email,
-                "prompt": get_llm_prompt(user_email),  # Call helper directly
+                "prompt": get_llm_prompt(user_email),
+                "openai_key_available": bool(os.environ.get("OPENAI_KEY")),
+                "anthropic_key_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+                "webhook_setup_instructions": "Set up SendGrid Inbound Parse webhook to point to your /api/process-email endpoint",
             }
         )
 
@@ -488,4 +658,4 @@ if not os.path.exists(DATABASE_PATH):
 if __name__ == "__main__":
     # Initialize the app (registers teardown)
     init_app(app)
-    app.run(debug=True)
+    app.run(debug=True, port=7000)
