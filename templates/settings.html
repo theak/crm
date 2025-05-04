@@ -90,28 +90,41 @@
 </head>
 <body>
     <h1>Settings</h1>
-    
+
     <div class="nav">
         <a href="/">Dashboard</a>
         <a href="/settings" class="active">Settings</a>
     </div>
-    
+
     <div id="message"></div>
-    
+
     <section>
         <h2>User Settings</h2>
-        
+
         <form id="emailForm">
             <div class="form-group">
                 <label for="userEmail">Your Email Address:</label>
                 <input type="email" id="userEmail" placeholder="your.email@example.com" required>
                 <div class="help-text">This email will be used to identify you in LLM prompts when processing incoming emails.</div>
             </div>
-            
+
             <button type="submit">Save Email</button>
         </form>
     </section>
-    
+
+    <section>
+        <h2>Dashboard Protection</h2>
+
+        <form id="passwordForm">
+            <div class="form-group">
+                <label for="dashboardPassword">Dashboard Password (Optional):</label>
+                <input type="text" id="dashboardPassword" placeholder="Leave blank for no password">
+                <div class="help-text">Set an optional password to protect access to the dashboard.</div>
+            </div>
+
+            <button type="submit">Save Password</button>
+        </form>
+    </section>
     <section>
         <h2>Email Processing Setup</h2>
         <p>To set up email processing:</p>
@@ -122,7 +135,7 @@
         </ol>
         <p><em>Note: The email processing feature is currently in development.</em></p>
     </section>
-    
+
     <script>
         // Show a message to the user
         function showMessage(message, isError = false) {
@@ -130,13 +143,13 @@
             messageDiv.textContent = message;
             messageDiv.className = isError ? 'error' : 'success';
             messageDiv.style.display = 'block';
-            
+
             // Hide message after 5 seconds
             setTimeout(() => {
                 messageDiv.style.display = 'none';
             }, 5000);
-        }
-        
+        } //
+
         // Load user email
         function loadUserEmail() {
             fetch('/api/settings/user_email')
@@ -147,17 +160,34 @@
                     }
                 })
                 .catch(error => {
-                    console.error('Error:', error);
+                    console.error('Error loading email:', error);
                     showMessage('Failed to load email settings', true);
                 });
+        } //
+
+        // Load dashboard password
+        function loadPassword() {
+            fetch('/api/settings/password') // Fetch from the new endpoint
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Use dashboardPassword input field
+                        document.getElementById('dashboardPassword').value = data.value || ''; // Handle null/undefined
+                    }
+                })
+                .catch(error => {
+                    console.error('Error loading password:', error);
+                    // Use a more specific message if desired
+                    showMessage('Failed to load password setting', true);
+                });
         }
-        
-        // Handle form submission
+
+        // Handle email form submission
         document.getElementById('emailForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            
+
             const email = document.getElementById('userEmail').value.trim();
-            
+
             fetch('/api/settings/user_email', {
                 method: 'POST',
                 headers: {
@@ -172,19 +202,50 @@
                 if (data.success) {
                     showMessage('Your email has been saved');
                 } else {
-                    showMessage(data.error, true);
+                    showMessage(data.error || 'Failed to save email', true); // Provide default error
                 }
             })
             .catch(error => {
-                console.error('Error:', error);
+                console.error('Error saving email:', error);
                 showMessage('An error occurred while saving your email', true);
             });
+        }); //
+
+        // Handle password form submission
+        document.getElementById('passwordForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+
+            // Allow empty password, don't trim
+            const password = document.getElementById('dashboardPassword').value;
+
+            fetch('/api/settings/password', { // Post to the new endpoint
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    value: password // Send the password value
+                }),
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showMessage('Password setting has been saved'); // Updated message
+                } else {
+                     showMessage(data.error || 'Failed to save password', true); // Provide default error
+                }
+            })
+            .catch(error => {
+                console.error('Error saving password:', error);
+                showMessage('An error occurred while saving the password', true); // Updated message
+            });
         });
-        
+
         // Initial load
         document.addEventListener('DOMContentLoaded', function() {
             loadUserEmail();
-        });
+            loadPassword(); // Load the password on page load
+        }); //
     </script>
 </body>
 </html>

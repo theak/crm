@@ -1,27 +1,56 @@
-from flask import Flask, request, jsonify, render_template
-from jinja2 import Template
-
-import sqlite3
 import enum
+import functools  # Added for decorator
 import os
 import re
+import sqlite3
+
+from flask import (
+    Flask,
+    Response,  # Added for Basic Auth response
+    g,  # Added for app context db connection
+    jsonify,
+    render_template,
+    request,
+)
+from jinja2 import Template
+
 
 class CustomerStatus(enum.Enum):
     NEED_TO_RESPOND = 1  # You need to respond to them
     WAITING_ON_THEM = 2  # They need to get back to you
-    NO_ACTION = 3        # No action needed
+    NO_ACTION = 3  # No action needed
 
-app = Flask(__name__, template_folder='templates')
+
+app = Flask(__name__, template_folder="templates")
 
 # Database setup
 DATABASE_PATH = "customer_tracker.db"
 
+
+def get_db():
+    """Get a database connection for the current request context"""
+    db = getattr(g, "_database", None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE_PATH)
+        db.row_factory = sqlite3.Row  # This enables column access by name
+    return db
+
+
+@app.teardown_appcontext
+def close_connection(exception):
+    """Close the database connection at the end of the request"""
+    db = getattr(g, "_database", None)
+    if db is not None:
+        db.close()
+
+
 def init_db():
     """Initialize the database and create tables if they don't exist"""
+    # Use a separate connection for initialization
     with sqlite3.connect(DATABASE_PATH) as conn:
         cursor = conn.cursor()
         # Create customers table if it doesn't exist
-        cursor.execute('''
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             domain TEXT UNIQUE NOT NULL,
@@ -29,29 +58,78 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             status_changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        ''')
+        """)
 
         # Create settings table
-        cursor.execute('''
+        cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-        ''')
+        """)
 
         # Insert default settings if they don't exist
-        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('user_email', '')")
+        cursor.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('user_email', '')"
+        )
+        cursor.execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('password', '')"
+        )  # Default password is empty
 
         conn.commit()
 
-def get_db_connection():
-    """Get a database connection"""
-    conn = sqlite3.connect(DATABASE_PATH)
-    conn.row_factory = sqlite3.Row  # This enables column access by name
-    return conn
 
-@app.route('/api/set_customer_status', methods=['POST'])
+# --- Authentication ---
+def check_auth(password_attempt):
+    """Check if the provided password matches the one in the DB."""
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = 'password'")
+    result = cursor.fetchone()
+    stored_password = result["value"] if result else None
+    # If no password is set in DB, auth is effectively disabled
+    return stored_password and password_attempt == stored_password
+
+
+def authenticate():
+    """Sends a 401 response that enables basic auth"""
+    return Response(
+        "Could not verify your access level for that URL.\n"
+        "You have to login with proper credentials",
+        401,
+        {"WWW-Authenticate": 'Basic realm="Login Required"'},
+    )
+
+
+def require_auth(f):
+    """Decorator to enforce basic authentication if password is set"""
+
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'password'")
+        result = cursor.fetchone()
+        stored_password = result["value"] if result and result["value"] else None
+
+        # Only enforce auth if a password is set in the database
+        if stored_password:
+            auth = request.authorization
+            # If no auth header or incorrect password, request authentication
+            if not auth or not check_auth(auth.password):
+                return authenticate()
+        # If no password is set OR auth is successful, proceed to the view
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+# --- End Authentication ---
+
+
+@app.route("/api/set_customer_status", methods=["POST"])
+# No auth required for this endpoint by default
 def set_customer_status():
     """Set or update a customer's status"""
     if not request.is_json:
@@ -60,14 +138,14 @@ def set_customer_status():
     data = request.get_json()
 
     # Validate required fields
-    if 'domain' not in data or 'status' not in data:
+    if "domain" not in data or "status" not in data:
         return jsonify({"error": "Both domain and status are required"}), 400
 
-    domain = data['domain'].strip().lower()
-    status = data['status']
+    domain = data["domain"].strip().lower()
+    status = data["status"]
 
     # Validate domain
-    if not domain or '.' not in domain:
+    if not domain or "." not in domain:
         return jsonify({"error": "Invalid domain format"}), 400
 
     # Validate status
@@ -75,178 +153,209 @@ def set_customer_status():
         status = int(status)
         if status not in [s.value for s in CustomerStatus]:
             valid_statuses = [f"{s.value}: {s.name}" for s in CustomerStatus]
-            return jsonify({
-                "error": f"Invalid status. Valid options are: {', '.join(valid_statuses)}"
-            }), 400
+            return jsonify(
+                {
+                    "error": f"Invalid status. Valid options are: {', '.join(valid_statuses)}"
+                }
+            ), 400
     except ValueError:
         return jsonify({"error": "Status must be a number"}), 400
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        db = get_db()
+        cursor = db.cursor()
 
-            # Check if customer exists and get current status if it does
-            cursor.execute("SELECT id, status FROM customers WHERE domain = ?", (domain,))
-            result = cursor.fetchone()
+        # Check if customer exists and get current status if it does
+        cursor.execute("SELECT id, status FROM customers WHERE domain = ?", (domain,))
+        result = cursor.fetchone()
 
-            if result:
-                # If status has changed, update status_changed_at timestamp
-                if result['status'] != status:
-                    cursor.execute(
-                        "UPDATE customers SET status = ?, status_changed_at = CURRENT_TIMESTAMP WHERE domain = ?",
-                        (status, domain)
-                    )
-                else:
-                    # Status hasn't changed, only update the status field
-                    cursor.execute(
-                        "UPDATE customers SET status = ? WHERE domain = ?",
-                        (status, domain)
-                    )
-            else:
-                # Insert new customer with current timestamp for both created_at and status_changed_at
+        if result:
+            # If status has changed, update status_changed_at timestamp
+            if result["status"] != status:
                 cursor.execute(
-                    "INSERT INTO customers (domain, status, created_at, status_changed_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-                    (domain, status)
+                    "UPDATE customers SET status = ?, status_changed_at = CURRENT_TIMESTAMP WHERE domain = ?",
+                    (status, domain),
                 )
+            else:
+                # Status hasn't changed, only update the status field
+                cursor.execute(
+                    "UPDATE customers SET status = ? WHERE domain = ?",
+                    (status, domain),
+                )
+        else:
+            # Insert new customer with current timestamp for both created_at and status_changed_at
+            cursor.execute(
+                "INSERT INTO customers (domain, status, created_at, status_changed_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (domain, status),
+            )
 
-            conn.commit()
+        db.commit()
 
-            return jsonify({
+        return jsonify(
+            {
                 "success": True,
-                "message": f"Customer {domain} status has been set to {CustomerStatus(status).name}"
-            })
+                "message": f"Customer {domain} status has been set to {CustomerStatus(status).name}",
+            }
+        )
 
     except Exception as e:
+        # Rollback in case of error might be needed depending on transaction handling
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/get_customers', methods=['GET'])
+
+@app.route("/api/get_customers", methods=["GET"])
+@require_auth  # Protect this endpoint
 def get_customers():
     """Get all customers and their statuses"""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT
-                    domain,
-                    status,
-                    created_at,
-                    status_changed_at,
-                    (julianday('now') - julianday(status_changed_at)) as days_since_status_change
-                FROM customers
-                ORDER BY domain
-            """)
-            rows = cursor.fetchall()
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT
+                domain,
+                status,
+                created_at,
+                status_changed_at,
+                (julianday('now') - julianday(status_changed_at)) as days_since_status_change
+            FROM customers
+            ORDER BY domain
+        """)
+        rows = cursor.fetchall()
 
-            customers = []
-            for row in rows:
-                status_enum = CustomerStatus(row['status'])
-                customers.append({
-                    "domain": row['domain'],
-                    "status": row['status'],
+        customers = []
+        for row in rows:
+            status_enum = CustomerStatus(row["status"])
+            customers.append(
+                {
+                    "domain": row["domain"],
+                    "status": row["status"],
                     "status_name": status_enum.name,
-                    "created_at": row['created_at'],
-                    "status_changed_at": row['status_changed_at'],
-                    "days_since_status_change": round(row['days_since_status_change'], 1)
-                })
+                    "created_at": row["created_at"],
+                    "status_changed_at": row["status_changed_at"],
+                    "days_since_status_change": round(
+                        row["days_since_status_change"], 1
+                    ),
+                }
+            )
 
-            return jsonify({
-                "success": True,
-                "customers": customers,
-                "count": len(customers)
-            })
+        return jsonify(
+            {"success": True, "customers": customers, "count": len(customers)}
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/get_customer_status/<domain>', methods=['GET'])
+
+@app.route("/api/get_customer_status/<domain>", methods=["GET"])
+@require_auth  # Protect this endpoint
 def get_customer_status(domain):
     """Get a specific customer's status by domain"""
     domain = domain.strip().lower()
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT
-                    domain,
-                    status,
-                    created_at,
-                    status_changed_at,
-                    (julianday('now') - julianday(status_changed_at)) as days_since_status_change
-                FROM customers
-                WHERE domain = ?
-            """, (domain,))
-            row = cursor.fetchone()
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            """
+            SELECT
+                domain,
+                status,
+                created_at,
+                status_changed_at,
+                (julianday('now') - julianday(status_changed_at)) as days_since_status_change
+            FROM customers
+            WHERE domain = ?
+        """,
+            (domain,),
+        )
+        row = cursor.fetchone()
 
-            if not row:
-                return jsonify({
-                    "error": f"Customer with domain '{domain}' not found"
-                }), 404
+        if not row:
+            return jsonify({"error": f"Customer with domain '{domain}' not found"}), 404
 
-            status_enum = CustomerStatus(row['status'])
-            return jsonify({
+        status_enum = CustomerStatus(row["status"])
+        return jsonify(
+            {
                 "success": True,
-                "domain": row['domain'],
-                "status": row['status'],
+                "domain": row["domain"],
+                "status": row["status"],
                 "status_name": status_enum.name,
-                "created_at": row['created_at'],
-                "status_changed_at": row['status_changed_at'],
-                "days_since_status_change": round(row['days_since_status_change'], 1)
-            })
+                "created_at": row["created_at"],
+                "status_changed_at": row["status_changed_at"],
+                "days_since_status_change": round(row["days_since_status_change"], 1),
+            }
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # Settings endpoints
-@app.route('/api/settings', methods=['GET'])
+@app.route("/api/settings", methods=["GET"])
+@require_auth  # Protect this endpoint
 def get_settings():
     """Get all settings"""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT key, value, updated_at FROM settings")
-            rows = cursor.fetchall()
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT key, value, updated_at FROM settings")
+        rows = cursor.fetchall()
 
-            settings = {}
-            for row in rows:
-                settings[row['key']] = {
-                    'value': row['value'],
-                    'updated_at': row['updated_at']
+        settings = {}
+        for row in rows:
+            # Mask password if it exists
+            if row["key"] == "password" and row["value"]:
+                settings[row["key"]] = {
+                    "value": "********",  # Mask the password
+                    "updated_at": row["updated_at"],
+                }
+            else:
+                settings[row["key"]] = {
+                    "value": row["value"],
+                    "updated_at": row["updated_at"],
                 }
 
-            return jsonify({
-                "success": True,
-                "settings": settings
-            })
+        return jsonify({"success": True, "settings": settings})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/settings/<key>', methods=['GET'])
+
+@app.route("/api/settings/<key>", methods=["GET"])
+@require_auth  # Protect this endpoint
 def get_setting(key):
     """Get a specific setting by key"""
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT key, value, updated_at FROM settings WHERE key = ?", (key,))
-            row = cursor.fetchone()
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT key, value, updated_at FROM settings WHERE key = ?", (key,)
+        )
+        row = cursor.fetchone()
 
-            if not row:
-                return jsonify({
-                    "error": f"Setting with key '{key}' not found"
-                }), 404
+        if not row:
+            return jsonify({"error": f"Setting with key '{key}' not found"}), 404
 
-            return jsonify({
+        value_to_return = row["value"]
+        # Mask password if requested key is 'password' and value is not empty
+        if key == "password" and value_to_return:
+            value_to_return = "********"
+
+        return jsonify(
+            {
                 "success": True,
-                "key": row['key'],
-                "value": row['value'],
-                "updated_at": row['updated_at']
-            })
+                "key": row["key"],
+                "value": value_to_return,
+                "updated_at": row["updated_at"],
+            }
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/settings/<key>', methods=['POST'])
+
+@app.route("/api/settings/<key>", methods=["POST"])
+@require_auth  # Protect this endpoint
 def update_setting(key):
     """Update a specific setting by key"""
     if not request.is_json:
@@ -255,57 +364,71 @@ def update_setting(key):
     data = request.get_json()
 
     # Validate required fields
-    if 'value' not in data:
+    if "value" not in data:
         return jsonify({"error": "Value is required"}), 400
 
-    value = data['value']
+    value = data["value"]
 
     # Special validation for email
-    if key == 'user_email' and value:
+    if key == "user_email" and value:
         # Basic email validation
         if not re.match(r"[^@]+@[^@]+\.[^@]+", value):
             return jsonify({"error": "Invalid email format"}), 400
 
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?",
+            (value, key),
+        )
+
+        if cursor.rowcount == 0:
+            # Setting doesn't exist, check if it's a valid key before inserting
+            if key not in ["user_email", "password"]:  # Only allow known keys
+                return jsonify({"error": f"Setting key '{key}' is not allowed"}), 400
             cursor.execute(
-                "UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = ?",
-                (value, key)
+                "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
+                (key, value),
             )
 
-            if cursor.rowcount == 0:
-                # Setting doesn't exist, insert it
-                cursor.execute(
-                    "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)",
-                    (key, value)
-                )
+        db.commit()
 
-            conn.commit()
-
-            return jsonify({
-                "success": True,
-                "message": f"Setting '{key}' has been updated"
-            })
+        return jsonify(
+            {"success": True, "message": f"Setting '{key}' has been updated"}
+        )
 
     except Exception as e:
+        # Rollback might be needed
         return jsonify({"error": str(e)}), 500
 
+
 # Root route to serve the frontend
-@app.route('/')
+@app.route("/")
+@require_auth  # Protect this endpoint
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
+
 
 # Settings page
-@app.route('/settings')
+@app.route("/settings")
+@require_auth  # Protect this endpoint
 def settings():
-    return render_template('settings.html')
+    return render_template("settings.html")
+
 
 # Email processing endpoint (skeleton)
-@app.route('/api/process-email', methods=['GET'])
+@app.route("/api/process-email", methods=["GET"])
+# No auth required by default for webhook/external access
 def process_email():
     """Process an incoming email and update customer status"""
     try:
+        db = get_db()  # Need DB access here
+        cursor = db.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key = 'user_email'")
+        user_email_row = cursor.fetchone()
+        user_email = user_email_row["value"] if user_email_row else ""
+
         # This is a placeholder for the actual email processing logic
         # In a real implementation, this would:
         # 1. Parse the incoming email from the request (format depends on your webhook provider)
@@ -315,37 +438,54 @@ def process_email():
         # 5. Update customer status based on LLM response
 
         # For now, just return a placeholder response
-        return jsonify({
-            "success": True,
-            "message": "Email processing endpoint is set up but not yet implemented",
-            "user_email": get_setting("user_email").json['value'],
-            "prompt": get_llm_prompt(get_setting("user_email").json['value']),
-        })
+        return jsonify(
+            {
+                "success": True,
+                "message": "Email processing endpoint is set up but not yet implemented",
+                "user_email": user_email,
+                "prompt": get_llm_prompt(user_email),  # Call helper directly
+            }
+        )
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # Function to get the LLM prompt template
 def get_llm_prompt(user_email):
     """Get the LLM prompt template with the user's email filled in"""
-    prompt_path = os.path.join(os.path.dirname(__file__), 'templates', 'llm_prompt.txt')
+    prompt_path = os.path.join(os.path.dirname(__file__), "templates", "llm_prompt.txt")
 
-    with open(prompt_path, 'r') as file:
-        template_content = file.read()
+    # Check if template exists
+    if not os.path.exists(prompt_path):
+        return "Error: llm_prompt.txt template not found."
+
+    try:
+        with open(prompt_path, "r") as file:
+            template_content = file.read()
+    except IOError as e:
+        return f"Error reading llm_prompt.txt: {e}"
 
     template = Template(template_content)
     return template.render(user_email=user_email)
 
-# Initialize database
-def init_app(app):
-    with app.app_context():
+
+# Initialize database within app context
+def init_app(current_app):
+    with current_app.app_context():
+        init_db()
+        # Ensure the database connection is available for the first request if needed
+        get_db()
+
+
+# Create the database file if it doesn't exist and initialize schema
+if not os.path.exists(DATABASE_PATH):
+    # Need an app context to initialize the DB properly if using g
+    temp_app = Flask(__name__)
+    with temp_app.app_context():
         init_db()
 
-# Create the database file if it doesn't exist
-if not os.path.exists(DATABASE_PATH):
-    init_db()
-
-if __name__ == '__main__':
-    # Initialize the database
+if __name__ == "__main__":
+    # Initialize the app (registers teardown)
     init_app(app)
     app.run(debug=True)
